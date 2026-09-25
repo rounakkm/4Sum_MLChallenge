@@ -109,8 +109,10 @@ def build_training_set(s1_df, s2_df, s3_df, gt, sample_size=15000, max_cands=20,
         for cid in true_ids:
             rec_target = idx2.records.get(cid) if cid.startswith('S2-') else idx3.records.get(cid)
             if rec_target is not None:
-                nb, ab, cb, nb_tok, ab_tok, nb_nums = rec_target
-                feature_tuples.append((na, aa, ca, nb, ab, cb, na_tok, nb_tok, aa_tok, ab_tok, na_nums, nb_nums, 1))
+                nb, ab, nb_nums = rec_target
+                nb_tok = set(nb.split())
+                ab_tok = set(ab.split())
+                feature_tuples.append((na, aa, ca, nb, ab, ca, na_tok, nb_tok, aa_tok, ab_tok, na_nums, set(nb_nums), 1))
 
         # 2. Negatives
         non_match_cands = list(cand_ids - true_ids)
@@ -122,8 +124,10 @@ def build_training_set(s1_df, s2_df, s3_df, gt, sample_size=15000, max_cands=20,
             for cid in non_match_cands:
                 rec_target = idx2.records.get(cid) if cid.startswith('S2-') else idx3.records.get(cid)
                 if rec_target is not None:
-                    nb, ab, cb, nb_tok, ab_tok, nb_nums = rec_target
-                    feature_tuples.append((na, aa, ca, nb, ab, cb, na_tok, nb_tok, aa_tok, ab_tok, na_nums, nb_nums, 0))
+                    nb, ab, nb_nums = rec_target
+                    nb_tok = set(nb.split())
+                    ab_tok = set(ab.split())
+                    feature_tuples.append((na, aa, ca, nb, ab, ca, na_tok, nb_tok, aa_tok, ab_tok, na_nums, set(nb_nums), 0))
 
     n_samples = len(feature_tuples)
     n_feats = len(FEATURE_NAMES)

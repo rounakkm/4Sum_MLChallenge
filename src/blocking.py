@@ -75,12 +75,9 @@ class FastBlockingIndex:
             c_norm = normalize_country(c_raw)
 
             name_tokens = n_norm.split()
-            addr_tokens = a_norm.split()
-            name_tok_set = set(name_tokens)
-            addr_tok_set = set(addr_tokens)
-            addr_nums = get_address_numbers(a_norm)
+            addr_nums = tuple(get_address_numbers(a_norm))
 
-            self.records[eid] = (n_norm, a_norm, c_norm, name_tok_set, addr_tok_set, addr_nums)
+            self.records[eid] = (n_norm, a_norm, addr_nums)
 
             # 1. Index distinctive name tokens
             for t in name_tokens:
@@ -93,12 +90,13 @@ class FastBlockingIndex:
             for num in addr_nums:
                 self.addr_idx[num].append(eid)
 
-    def query(self, s1_name_norm, s1_addr_norm, max_candidates=20):
+    def query(self, s1_name_norm, s1_addr_norm, max_candidates=20, name_tokens=None, s1_nums=None):
         """Query candidates for an S1 entity."""
         scores = defaultdict(float)
 
         # 1. Match on distinctive name tokens
-        name_tokens = s1_name_norm.split()
+        if name_tokens is None:
+            name_tokens = s1_name_norm.split()
         for t in name_tokens:
             if len(t) >= 3 and t not in STOP_WORDS:
                 postings = self.token_idx.get(t)
@@ -113,7 +111,8 @@ class FastBlockingIndex:
                             scores[cid] += 1.5
 
         # 2. Match on street numbers
-        s1_nums = get_address_numbers(s1_addr_norm)
+        if s1_nums is None:
+            s1_nums = get_address_numbers(s1_addr_norm)
         for num in s1_nums:
             a_postings = self.addr_idx.get(num)
             if a_postings and len(a_postings) <= self.max_postings:

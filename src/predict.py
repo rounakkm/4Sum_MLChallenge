@@ -40,13 +40,13 @@ logger = logging.getLogger(__name__)
 
 
 def run_country_inference(s1_df, s2_df, s3_df, model, threshold, cand_file, match_file,
-                          max_candidates=20, batch_size=10000):
+                          max_candidates=20, batch_size=20000):
     """Run candidate retrieval, feature computation, and scoring for one country subset."""
     n_s1 = len(s1_df)
     if n_s1 == 0:
         return 0, 0
 
-    logger.info(f"Indexing S2 ({len(s2_df)} records) and S3 ({len(s3_df)} records)...")
+    logger.info(f"Indexing S2 ({len(s2_df):,} records) and S3 ({len(s3_df):,} records)...")
     idx2 = FastBlockingIndex(max_postings=2000)
     idx2.add_records(s2_df)
 
@@ -59,28 +59,38 @@ def run_country_inference(s1_df, s2_df, s3_df, model, threshold, cand_file, matc
     n_feats = len(FEATURE_NAMES)
     t0_country = time.time()
 
+    # Pre-normalize S1 records
+    logger.info(f"Pre-normalizing {n_s1:,} S1 records for country...")
+    s1_eids = s1_df['entity_id'].values
+    s1_names_raw = s1_df['business_name'].values
+    s1_addrs_raw = s1_df['business_address'].values
+    s1_cntry_raw = s1_df['country'].values
+
+    s1_processed = []
+    for i in range(n_s1):
+        na = normalize_name(str(s1_names_raw[i] or ""))
+        aa = normalize_address(str(s1_addrs_raw[i] or ""))
+        ca = normalize_country(str(s1_cntry_raw[i] or ""))
+        na_split = na.split()
+        na_tok = set(na_split)
+        aa_tok = set(aa.split())
+        na_nums = set(get_address_numbers(aa))
+        s1_processed.append((s1_eids[i], na, aa, ca, na_split, na_tok, aa_tok, na_nums))
+
     # Process S1 entities in batches
     for start_idx in range(0, n_s1, batch_size):
         t0_batch = time.time()
         end_idx = min(start_idx + batch_size, n_s1)
-        batch_s1 = s1_df.iloc[start_idx:end_idx]
+        batch_slice = s1_processed[start_idx:end_idx]
 
         batch_candidates = {}
         valid_pairs_meta = []  # (eid, cid)
         pair_feature_data = []
 
         # 1. Candidate retrieval and fast pre-filter
-        for row in batch_s1.itertuples(index=False):
-            eid = row.entity_id
-            na = normalize_name(row.business_name)
-            aa = normalize_address(row.business_address)
-            ca = normalize_country(row.country)
-            na_tok = set(na.split())
-            aa_tok = set(aa.split())
-            na_nums = get_address_numbers(aa)
-
-            c2 = idx2.query(na, aa, max_candidates=max_candidates)
-            c3 = idx3.query(na, aa, max_candidates=max_candidates)
+        for eid, na, aa, ca, na_split, na_tok, aa_tok, na_nums in batch_slice:
+            c2 = idx2.query(na, aa, max_candidates=max_candidates, name_tokens=na_split, s1_nums=na_nums)
+            c3 = idx3.query(na, aa, max_candidates=max_candidates, name_tokens=na_split, s1_nums=na_nums)
 
             # Deduplicate candidates while preserving order
             seen = set()
@@ -96,18 +106,19 @@ def run_country_inference(s1_df, s2_df, s3_df, model, threshold, cand_file, matc
             for cid in cand_list:
                 rec_target = idx2.records.get(cid) if cid.startswith("S2-") else idx3.records.get(cid)
                 if rec_target is not None:
-                    nb, ab, cb, nb_tok, ab_tok, nb_nums = rec_target
-                    # Fast pre-filter: name similarity or street number match
+                    nb, ab, nb_nums = rec_target
                     name_sim = fuzz.token_sort_ratio(na, nb)
-                    num_match = bool(na_nums and nb_nums and (na_nums & nb_nums))
+                    num_match = bool(na_nums and nb_nums and na_nums.intersection(nb_nums))
 
                     if name_sim >= 35 or num_match:
-                        pair_feature_data.append((na, aa, ca, nb, ab, cb, na_tok, nb_tok, aa_tok, ab_tok, na_nums, nb_nums))
+                        nb_tok = set(nb.split())
+                        ab_tok = set(ab.split())
+                        pair_feature_data.append((na, aa, ca, nb, ab, ca, na_tok, nb_tok, aa_tok, ab_tok, na_nums, set(nb_nums)))
                         valid_pairs_meta.append((eid, cid))
 
         # 2. Extract features directly into pre-allocated NumPy array
         n_pairs = len(pair_feature_data)
-        eid_matches = {row.entity_id: [] for row in batch_s1.itertuples(index=False)}
+        eid_matches = {item[0]: [] for item in batch_slice}
 
         if n_pairs > 0:
             X_batch = np.empty((n_pairs, n_feats), dtype=np.float32)
@@ -123,8 +134,8 @@ def run_country_inference(s1_df, s2_df, s3_df, model, threshold, cand_file, matc
                     eid_matches[eid].append(cid)
 
         # 3. Stream write results to disk
-        for row in batch_s1.itertuples(index=False):
-            eid = row.entity_id
+        for item in batch_slice:
+            eid = item[0]
             cands = batch_candidates.get(eid, [])
             matches = eid_matches.get(eid, [])
 
@@ -140,12 +151,12 @@ def run_country_inference(s1_df, s2_df, s3_df, model, threshold, cand_file, matc
         dt_batch = time.time() - t0_batch
         logger.info(
             f"  Batch {end_idx:,}/{n_s1:,} ({100*end_idx/n_s1:.1f}%) | "
-            f"{n_pairs:,} pairs scored in {dt_batch:.1f}s ({len(batch_s1)/dt_batch:.0f} entities/s) | "
+            f"{n_pairs:,} pairs scored in {dt_batch:.1f}s ({len(batch_slice)/dt_batch:.0f} entities/s) | "
             f"Matches: {total_matches_written:,}"
         )
 
     logger.info(f"Finished country in {time.time()-t0_country:.1f}s.")
-    del idx2, idx3
+    del idx2, idx3, s1_processed
     gc.collect()
     return total_candidates_written, total_matches_written
 
@@ -183,9 +194,27 @@ def run_inference(args):
     s1_df, s2_df, s3_df, _ = load_all(data_dir, split=args.split)
     logger.info(f"Test records loaded: S1={len(s1_df):,}, S2={len(s2_df):,}, S3={len(s3_df):,}")
 
-    with open(cand_path, "w", encoding="utf-8") as f_cand, open(match_path, "w", encoding="utf-8") as f_match:
-        f_cand.write("source1_entity_id\tcandidate_entity_ids\n")
-        f_match.write("source1_entity_id\tmatched_entity_ids\n")
+    cand_exists = cand_path.exists() and cand_path.stat().st_size > 0
+    match_exists = match_path.exists() and match_path.stat().st_size > 0
+
+    seen_eids = set()
+    if cand_exists and match_exists:
+        logger.info("Checking existing output files for resume...")
+        with open(match_path, "r", encoding="utf-8") as f:
+            first_line = f.readline()
+            for line in f:
+                parts = line.split("\t")
+                if parts and parts[0]:
+                    seen_eids.add(parts[0])
+        logger.info(f"Found {len(seen_eids):,} previously processed entities.")
+
+    write_header = not (cand_exists and match_exists and len(seen_eids) > 0)
+    file_mode = "a" if not write_header else "w"
+
+    with open(cand_path, file_mode, encoding="utf-8") as f_cand, open(match_path, file_mode, encoding="utf-8") as f_match:
+        if write_header:
+            f_cand.write("source1_entity_id\tcandidate_entity_ids\n")
+            f_match.write("source1_entity_id\tmatched_entity_ids\n")
 
         s1_countries = s1_df['country'].fillna('').map(normalize_country)
         s2_countries = s2_df['country'].fillna('').map(normalize_country)
@@ -196,11 +225,17 @@ def run_inference(args):
         total_matches = 0
 
         for c in unique_countries:
+            s1_sub = s1_df[s1_countries == c].reset_index(drop=True)
+            s1_sub_eids = set(s1_sub['entity_id'])
+
+            if seen_eids and s1_sub_eids.issubset(seen_eids):
+                logger.info(f"Skipping already processed country: '{c.upper()}' ({len(s1_sub):,} entities).")
+                continue
+
             logger.info("-" * 65)
-            logger.info(f"PROCESSING COUNTRY: '{c.upper()}'")
+            logger.info(f"PROCESSING COUNTRY: '{c.upper()}' ({len(s1_sub):,} S1 entities)")
             logger.info("-" * 65)
 
-            s1_sub = s1_df[s1_countries == c].reset_index(drop=True)
             s2_sub = s2_df[s2_countries == c].reset_index(drop=True)
             s3_sub = s3_df[s3_countries == c].reset_index(drop=True)
 
@@ -210,14 +245,13 @@ def run_inference(args):
             )
             total_cands += c_cands
             total_matches += c_matches
+            del s2_sub, s3_sub
+            gc.collect()
 
     elapsed = time.time() - t_start
     logger.info("=" * 65)
     logger.info(f"INFERENCE COMPLETE in {elapsed/60:.2f} minutes ({elapsed:.1f}s)!")
     logger.info(f"Total S1 entities evaluated: {len(s1_df):,}")
-    logger.info(f"Total candidate pairs:       {total_cands:,}")
-    logger.info(f"Total matched pairs:         {total_matches:,}")
-    logger.info(f"Average matches per entity:  {total_matches/len(s1_df):.2f}")
     logger.info(f"Output files generated:")
     logger.info(f"  - {cand_path}")
     logger.info(f"  - {match_path}")
@@ -231,7 +265,7 @@ def main():
     parser.add_argument("--model", default="model.pkl", help="Path to trained model pickle.")
     parser.add_argument("--threshold", type=float, default=None, help="Decision threshold (defaults to model's best_threshold).")
     parser.add_argument("--max-candidates", type=int, default=20, help="Max candidates per source per entity.")
-    parser.add_argument("--batch-size", type=int, default=10000, help="Inference batch size.")
+    parser.add_argument("--batch-size", type=int, default=20000, help="Inference batch size.")
     parser.add_argument("--output-dir", default="output", help="Directory to save submission TSVs.")
     args = parser.parse_args()
     run_inference(args)
