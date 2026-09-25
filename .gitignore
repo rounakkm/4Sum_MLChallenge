@@ -1,6 +1,29 @@
+# Data files (large, not for version control)
 dataset/
 cleaned_data/
+
+# Python
 venv/
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Model artifacts (binary, large)
+model.pkl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
