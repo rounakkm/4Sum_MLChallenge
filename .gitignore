@@ -1,6 +1,7 @@
 # Data files (large, not for version control)
 dataset/
 cleaned_data/
+output/candidate_pairs.tsv
 
 # Python
 venv/
