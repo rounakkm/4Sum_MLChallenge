@@ -27,10 +27,12 @@ def load_ground_truth(path):
     """Load ground truth into a dict: source1_entity_id -> set(matched ids)."""
     df = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
     gt = {}
-    for _, row in df.iterrows():
-        raw = row["matched_entity_ids"]
-        ids = [i.strip() for i in raw.split(",") if i.strip()] if raw else []
-        gt[row["source1_entity_id"]] = set(ids)
+    eids = df["source1_entity_id"].values
+    raws = df["matched_entity_ids"].values
+    for i in range(len(eids)):
+        raw = raws[i]
+        ids = [mid.strip() for mid in raw.split(",") if mid.strip()] if raw else []
+        gt[eids[i]] = set(ids)
     return gt
 
 
